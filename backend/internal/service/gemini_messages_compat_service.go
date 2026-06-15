@@ -1692,13 +1692,74 @@ func sleepGeminiBackoff(attempt int) {
 var (
 	sensitiveQueryParamRegex = regexp.MustCompile(`(?i)([?&](?:key|client_secret|access_token|refresh_token)=)[^&"\s]+`)
 	retryInRegex             = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
+
+	// upstreamURLRegex 匹配错误消息中出现的任意 http(s) URL，
+	// 整体替换为通用占位，避免向终端用户暴露上游真实主机/路径。
+	upstreamURLRegex = regexp.MustCompile(`(?i)https?://[^\s"')\]}>,]+`)
+
+	// upstreamHostRegex 匹配裸主机名形式的上游身份特征（未带 scheme 的域名），
+	// 覆盖常见上游提供商域名。替换为通用占位。
+	upstreamHostRegex = regexp.MustCompile(`(?i)\b(?:[a-z0-9-]+\.)*(?:anthropic\.com|openai\.com|googleapis\.com|generativelanguage\.googleapis\.com|cloudcode-pa\.googleapis\.com|aiplatform\.googleapis\.com|x\.ai|deepseek\.com|moonshot\.cn|bigmodel\.cn)\b`)
+
+	// upstreamIdentityPatterns 匹配上游平台身份特征措辞。
+	// 命中时替换为通用消息，避免客户端从错误消息推断出上游 API 提供商。
+	upstreamIdentityPatterns = []*regexp.Regexp{
+		// API key 相关
+		regexp.MustCompile(`(?i)your API key.{0,60}(?:invalid|revoked|expired|incorrect|disabled|not.{0,10}valid)`),
+		regexp.MustCompile(`(?i)incorrect API key provided`),
+		// 配额/限额相关
+		regexp.MustCompile(`(?i)(?:you exceeded|exceeded your).{0,40}(?:quota|limit|current quota)`),
+		// 计费/余额相关
+		regexp.MustCompile(`(?i)(?:your credit balance|insufficient|billing).{0,40}(?:balance|quota|credit)`),
+		// 模型访问权限
+		regexp.MustCompile(`(?i)you do not have access to model.{0,60}`),
+	}
 )
 
+// upstreamIdentityReplacement 是匹配到上游特征措辞时的通用替换消息
+const upstreamIdentityReplacement = "Request failed due to a service condition"
+
+// upstreamURLReplacement 是匹配到上游 URL / 主机名时的通用替换占位
+const upstreamURLReplacement = "upstream service"
+
+// sanitizeUpstreamErrorMessage 对上游错误消息做基础脱敏：遮蔽 URL 中的敏感参数值、
+// 替换上游平台身份特征措辞。
+//
+// 注意：此函数同时用于**内部 ops 错误日志**与（经 sanitizeUpstreamErrorMessageForClient）
+// 用户侧错误。内部日志需要保留上游 host/path 供运维诊断，因此此函数**不**剥离主机名。
+// 面向终端用户时请改用 sanitizeUpstreamErrorMessageForClient（额外剥离上游 host/URL）。
 func sanitizeUpstreamErrorMessage(msg string) string {
 	if msg == "" {
 		return msg
 	}
-	return sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	// 1. 脱敏 URL 中的敏感参数（保留 URL 结构，仅遮蔽密钥参数值）
+	result := sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	// 2. 替换上游平台身份特征措辞
+	for _, p := range upstreamIdentityPatterns {
+		result = p.ReplaceAllString(result, upstreamIdentityReplacement)
+	}
+	return result
+}
+
+// sanitizeUpstreamErrorMessageForClient 在 sanitizeUpstreamErrorMessage 基础上，
+// 额外剥离暴露上游身份的 http(s) URL 与裸主机名，用于**返回给终端用户**的错误消息，
+// 避免泄露中转站背后的真实上游提供商。
+func sanitizeUpstreamErrorMessageForClient(msg string) string {
+	result := sanitizeUpstreamErrorMessage(msg)
+	if result == "" {
+		return result
+	}
+	// 整体替换暴露上游主机/路径的 http(s) URL
+	result = upstreamURLRegex.ReplaceAllString(result, upstreamURLReplacement)
+	// 替换裸主机名形式的上游域名（未带 scheme 的情况）
+	result = upstreamHostRegex.ReplaceAllString(result, upstreamURLReplacement)
+	return result
+}
+
+// SanitizeClientErrorMessage 是 sanitizeUpstreamErrorMessageForClient 的导出包装，
+// 供 handler 层在向终端用户写出错误消息的统一出口调用，确保不泄露上游 host/URL。
+func SanitizeClientErrorMessage(msg string) string {
+	return sanitizeUpstreamErrorMessageForClient(msg)
 }
 
 func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
@@ -1740,7 +1801,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 	); matched {
 		c.JSON(status, gin.H{
 			"type":  "error",
-			"error": gin.H{"type": errType, "message": errMsg},
+			"error": gin.H{"type": errType, "message": sanitizeUpstreamErrorMessageForClient(errMsg)},
 		})
 		if upstreamMsg == "" {
 			upstreamMsg = errMsg
@@ -1856,7 +1917,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 
 	c.JSON(statusCode, gin.H{
 		"type":  "error",
-		"error": gin.H{"type": errType, "message": errMsg},
+		"error": gin.H{"type": errType, "message": sanitizeUpstreamErrorMessageForClient(errMsg)},
 	})
 	if upstreamMsg == "" {
 		return fmt.Errorf("upstream error: %d", upstreamStatus)

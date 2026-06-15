@@ -127,9 +127,10 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileTLSFingerprintDoesNotInheritGeneric
 	svc := s.newService()
 	entry, err := svc.getClientEntryWithTLS("", 1, 1, &tlsfingerprint.Profile{Name: "test"}, service.HTTPUpstreamProfileOpenAI, false, false)
 	require.NoError(s.T(), err)
-	transport, ok := entry.client.Transport.(*http.Transport)
-	require.True(s.T(), ok, "expected *http.Transport")
-	require.Equal(s.T(), time.Duration(0), transport.ResponseHeaderTimeout, "OpenAI TLS path should not inherit generic header timeout")
+	tlsRT, ok := entry.client.Transport.(*tlsFingerprintTransport)
+	require.True(s.T(), ok, "expected *tlsFingerprintTransport")
+	require.NotNil(s.T(), tlsRT.h1, "h1 transport should be present")
+	require.Equal(s.T(), time.Duration(0), tlsRT.h1.ResponseHeaderTimeout, "OpenAI TLS path should not inherit generic header timeout")
 }
 
 func (s *HTTPUpstreamSuite) TestOpenAIProfileHTTP2DisabledUsesHTTP1Transport() {

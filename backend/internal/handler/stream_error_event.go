@@ -156,7 +156,7 @@ func mapResponsesErrorCode(errType string) string {
 	case "authentication_error":
 		return "authentication_failed"
 	case "upstream_error":
-		return "upstream_error"
+		return "server_error" // 伪装：不暴露中转层错误类型，映射为原生 server_error
 	case "server_error", "api_error", "":
 		return "server_error"
 	default:

@@ -160,7 +160,7 @@ func TestGatewayHandleStreamingAwareError_ResponsesStreamingEmitsResponseFailed(
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "upstream gone", true)
 
 	_, errObj := parseResponsesFailedSSE(t, w.Body.String())
-	assert.Equal(t, "upstream_error", errObj["code"])
+	assert.Equal(t, "server_error", errObj["code"]) // 伪装：upstream_error 映射为 server_error，不暴露中转层
 	assert.Equal(t, "upstream gone", errObj["message"])
 }
 
@@ -241,7 +241,7 @@ func TestMapResponsesErrorCode(t *testing.T) {
 		{"invalid_request_error", "invalid_request"},
 		{"permission_error", "permission_denied"},
 		{"authentication_error", "authentication_failed"},
-		{"upstream_error", "upstream_error"},
+		{"upstream_error", "server_error"}, // 伪装：不暴露中转层错误类型
 		{"server_error", "server_error"},
 		{"api_error", "server_error"},
 		{"", "server_error"},

@@ -4732,7 +4732,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			c.JSON(http.StatusBadGateway, gin.H{
 				"type": "error",
 				"error": gin.H{
-					"type":    "upstream_error",
+					"type":    "api_error",
 					"message": "Upstream request failed",
 				},
 			})
@@ -5134,16 +5134,23 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if reqStream {
 		streamResult, err := s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, reqModel, shouldMimicClaudeCode)
 		if err != nil {
-			if err.Error() == "have error in stream" {
+			// 客户端断开且已捕获有效 usage：按已捕获用量计费，避免白嫖。
+			if streamDisconnectBillable(streamResult, err) {
+				usage = streamResult.usage
+				firstTokenMs = streamResult.firstTokenMs
+				clientDisconnect = true
+			} else if err.Error() == "have error in stream" {
 				return nil, &UpstreamFailoverError{
 					StatusCode: 403,
 				}
+			} else {
+				return nil, err
 			}
-			return nil, err
+		} else {
+			usage = streamResult.usage
+			firstTokenMs = streamResult.firstTokenMs
+			clientDisconnect = streamResult.clientDisconnect
 		}
-		usage = streamResult.usage
-		firstTokenMs = streamResult.firstTokenMs
-		clientDisconnect = streamResult.clientDisconnect
 	} else {
 		usage, err = s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, reqModel)
 		if err != nil {
@@ -5262,7 +5269,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 			c.JSON(http.StatusBadGateway, gin.H{
 				"type": "error",
 				"error": gin.H{
-					"type":    "upstream_error",
+					"type":    "api_error",
 					"message": "Upstream request failed",
 				},
 			})
@@ -5399,11 +5406,19 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	if input.RequestStream {
 		streamResult, err := s.handleStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account, input.StartTime, input.RequestModel)
 		if err != nil {
-			return nil, err
+			// 客户端断开且已捕获有效 usage：按已捕获用量计费，避免白嫖。
+			if streamDisconnectBillable(streamResult, err) {
+				usage = streamResult.usage
+				firstTokenMs = streamResult.firstTokenMs
+				clientDisconnect = true
+			} else {
+				return nil, err
+			}
+		} else {
+			usage = streamResult.usage
+			firstTokenMs = streamResult.firstTokenMs
+			clientDisconnect = streamResult.clientDisconnect
 		}
-		usage = streamResult.usage
-		firstTokenMs = streamResult.firstTokenMs
-		clientDisconnect = streamResult.clientDisconnect
 	} else {
 		usage, err = s.handleNonStreamingResponseAnthropicAPIKeyPassthrough(ctx, resp, c, account)
 		if err != nil {
@@ -5989,11 +6004,19 @@ func (s *GatewayService) forwardBedrock(
 	if reqStream {
 		streamResult, err := s.handleBedrockStreamingResponse(ctx, resp, c, account, startTime, reqModel)
 		if err != nil {
-			return nil, err
+			// 客户端断开且已捕获有效 usage：按已捕获用量计费，避免白嫖。
+			if streamDisconnectBillable(streamResult, err) {
+				usage = streamResult.usage
+				firstTokenMs = streamResult.firstTokenMs
+				clientDisconnect = true
+			} else {
+				return nil, err
+			}
+		} else {
+			usage = streamResult.usage
+			firstTokenMs = streamResult.firstTokenMs
+			clientDisconnect = streamResult.clientDisconnect
 		}
-		usage = streamResult.usage
-		firstTokenMs = streamResult.firstTokenMs
-		clientDisconnect = streamResult.clientDisconnect
 	} else {
 		usage, err = s.handleBedrockNonStreamingResponse(ctx, resp, c, account)
 		if err != nil {
@@ -6062,7 +6085,7 @@ func (s *GatewayService) executeBedrockUpstream(
 			c.JSON(http.StatusBadGateway, gin.H{
 				"type": "error",
 				"error": gin.H{
-					"type":    "upstream_error",
+					"type":    "api_error",
 					"message": "Upstream request failed",
 				},
 			})
@@ -7389,7 +7412,7 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		resp.StatusCode,
 		body,
 		http.StatusBadGateway,
-		"upstream_error",
+		"api_error",
 		"Upstream request failed",
 	); matched {
 		c.JSON(status, gin.H{
@@ -7416,7 +7439,20 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 
 	switch resp.StatusCode {
 	case 400:
-		c.Data(http.StatusBadRequest, "application/json", body)
+		// 伪装：不透传上游原始 400 响应体（可能含水印或平台特有格式），
+		// 提取消息后用标准 Anthropic 错误格式重新封装。
+		// 内部日志仍保留原始摘要供运维排查。
+		safe400Msg := upstreamMsg
+		if safe400Msg == "" {
+			safe400Msg = "Invalid request"
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": safe400Msg,
+			},
+		})
 		summary := upstreamMsg
 		if summary == "" {
 			summary = truncateForLog(body, 512)
@@ -7427,11 +7463,11 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, summary)
 	case 401:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "api_error"
 		errMsg = "Upstream authentication failed, please contact administrator"
 	case 403:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "api_error"
 		errMsg = "Upstream access forbidden, please contact administrator"
 	case 429:
 		statusCode = http.StatusTooManyRequests
@@ -7443,11 +7479,11 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		errMsg = "Upstream service overloaded, please retry later"
 	case 500, 502, 503, 504:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "api_error"
 		errMsg = "Upstream service temporarily unavailable"
 	default:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "api_error"
 		errMsg = "Upstream request failed"
 	}
 
@@ -7552,7 +7588,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		resp.StatusCode,
 		respBody,
 		http.StatusBadGateway,
-		"upstream_error",
+		"api_error",
 		"Upstream request failed after retries",
 	); matched {
 		c.JSON(status, gin.H{
@@ -7577,7 +7613,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 	c.JSON(http.StatusBadGateway, gin.H{
 		"type": "error",
 		"error": gin.H{
-			"type":    "upstream_error",
+			"type":    "api_error",
 			"message": "Upstream request failed after retries",
 		},
 	})
@@ -7593,6 +7629,37 @@ type streamingResult struct {
 	usage            *ClaudeUsage
 	firstTokenMs     *int
 	clientDisconnect bool // 客户端是否在流式传输过程中断开
+}
+
+// claudeUsageHasTokens 判断 usage 是否捕获到任何计费 token。
+func claudeUsageHasTokens(u *ClaudeUsage) bool {
+	if u == nil {
+		return false
+	}
+	return u.InputTokens > 0 || u.OutputTokens > 0 ||
+		u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 ||
+		u.CacheCreation5mTokens > 0 || u.CacheCreation1hTokens > 0 ||
+		u.ImageOutputTokens > 0
+}
+
+// streamDisconnectBillable 判断一次返回 error 的流式响应是否应被“抢救”为可计费结果。
+//
+// 背景：客户端在收到 message_stop/[DONE] 终止事件之前断开连接时，
+// 由于 requestCtx 绑定客户端连接、断开会取消上游读取，handleStreamingResponse
+// 会返回 (streamResult{clientDisconnect:true, usage:已累积}, error)。
+// 若 Forward 直接 return nil,err，handler 会跳过 RecordUsage，导致整次请求
+// 不计费——可被用于零成本获取近乎完整的模型输出（白嫖）。
+//
+// 因此：当错误源于客户端断开且已捕获到有效 usage 时，应按已捕获的真实用量计费，
+// 把它作为带 ClientDisconnect 标记的成功结果返回，而非丢弃。
+func streamDisconnectBillable(streamResult *streamingResult, err error) bool {
+	if err == nil || streamResult == nil {
+		return false
+	}
+	if !streamResult.clientDisconnect {
+		return false
+	}
+	return claudeUsageHasTokens(streamResult.usage)
 }
 
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
@@ -9034,6 +9101,45 @@ func (s *GatewayService) calculateRecordUsageCost(
 
 // resolveChannelPricing 检查指定模型是否存在渠道级别定价。
 // 返回非 nil 的 ResolvedPricing 表示有渠道定价，nil 表示走默认定价路径。
+// apiKeyIDOrZero 安全读取 APIKey.ID。
+func apiKeyIDOrZero(apiKey *APIKey) int64 {
+	if apiKey == nil {
+		return 0
+	}
+	return apiKey.ID
+}
+
+// apiKeyGroupIDOrNil 安全读取 APIKey 所属分组 ID，缺失返回 nil。
+func apiKeyGroupIDOrNil(apiKey *APIKey) *int64 {
+	if apiKey == nil || apiKey.Group == nil {
+		return nil
+	}
+	gid := apiKey.Group.ID
+	return &gid
+}
+
+// HasPricingForModel 在转发前判断某模型是否存在任何可用定价来源
+// （渠道定价 / 动态价格 / fallback）。用于转发前预检，避免请求转发成功后
+// 才发现无定价而静默按 0 计费。判断从宽：任一来源命中即视为有定价，
+// 避免误拒已配置渠道定价的模型。
+func (s *GatewayService) HasPricingForModel(ctx context.Context, billingModel string, apiKey *APIKey) bool {
+	if strings.TrimSpace(billingModel) == "" {
+		// 模型为空时不在此处拦截，交由上游正常校验流程处理。
+		return true
+	}
+	// 1. 渠道定价
+	if resolved := s.resolveChannelPricing(ctx, billingModel, apiKey); resolved != nil {
+		return true
+	}
+	// 2. 动态价格 / fallback
+	if s.billingService != nil {
+		if _, err := s.billingService.GetModelPricing(billingModel); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *GatewayService) resolveChannelPricing(ctx context.Context, billingModel string, apiKey *APIKey) *ResolvedPricing {
 	if s.resolver == nil || apiKey.Group == nil {
 		return nil
@@ -9074,6 +9180,12 @@ func (s *GatewayService) calculateImageCost(
 			Resolved:       resolved,
 		})
 		if err != nil {
+			if errors.Is(err, ErrModelPricingUnavailable) {
+				logger.LegacyPrintf("service.gateway",
+					"[WARN] pricing_unavailable_billed_zero (image) model=%s api_key_id=%d group_id=%v err=%v",
+					billingModel, apiKeyIDOrZero(apiKey), apiKeyGroupIDOrNil(apiKey), err)
+				return &CostBreakdown{ActualCost: 0, PricingUnavailable: true}
+			}
 			logger.LegacyPrintf("service.gateway", "Calculate image token cost failed: %v", err)
 			return &CostBreakdown{ActualCost: 0}
 		}
@@ -9136,6 +9248,12 @@ func (s *GatewayService) calculateTokenCost(
 		cost, err = s.billingService.CalculateCost(billingModel, tokens, multiplier)
 	}
 	if err != nil {
+		if errors.Is(err, ErrModelPricingUnavailable) {
+			logger.LegacyPrintf("service.gateway",
+				"[WARN] pricing_unavailable_billed_zero model=%s api_key_id=%d group_id=%v err=%v",
+				billingModel, apiKeyIDOrZero(apiKey), apiKeyGroupIDOrNil(apiKey), err)
+			return &CostBreakdown{ActualCost: 0, PricingUnavailable: true}
+		}
 		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
 		return &CostBreakdown{ActualCost: 0}
 	}

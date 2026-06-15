@@ -127,8 +127,7 @@
                 </router-link>
 
                 <a
-                  v-if="authStore.isAdmin"
-                  href="https://github.com/Wei-Shaw/sub2api"
+                  v-if="false"
                   target="_blank"
                   rel="noopener noreferrer"
                   @click="closeDropdown"

@@ -25,7 +25,7 @@ type Profile struct {
 	PointFormats        []uint16
 	EnableGREASE        bool
 	SignatureAlgorithms []uint16 // Empty uses defaultSignatureAlgorithms
-	ALPNProtocols       []string // Empty uses ["http/1.1"]
+	ALPNProtocols       []string // Empty uses ["h2","http/1.1"]
 	SupportedVersions   []uint16 // Empty uses [TLS1.3, TLS1.2]
 	KeyShareGroups      []uint16 // Empty uses [X25519]
 	PSKModes            []uint16 // Empty uses [psk_dhe_ke]
@@ -298,6 +298,16 @@ func performTLSHandshake(ctx context.Context, conn net.Conn, profile *Profile, a
 	return tlsConn, nil
 }
 
+// NegotiatedProtocol returns the ALPN-negotiated protocol of a conn produced by
+// this package's DialTLSContext methods (e.g. "h2" or "http/1.1"). It returns an
+// empty string when conn is not a utls connection or ALPN did not negotiate.
+func NegotiatedProtocol(conn net.Conn) string {
+	if uc, ok := conn.(*utls.UConn); ok {
+		return uc.ConnectionState().NegotiatedProtocol
+	}
+	return ""
+}
+
 // toUTLSCurves converts uint16 slice to utls.CurveID slice.
 func toUTLSCurves(curves []uint16) []utls.CurveID {
 	result := make([]utls.CurveID, len(curves))
@@ -358,7 +368,7 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		}
 	}
 
-	alpnProtocols := []string{"http/1.1"}
+	alpnProtocols := []string{"h2", "http/1.1"}
 	if profile != nil && len(profile.ALPNProtocols) > 0 {
 		alpnProtocols = profile.ALPNProtocols
 	}

@@ -58,7 +58,7 @@ func TestGatewayHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "upstream_error", errField["type"])
+	assert.Equal(t, "api_error", errField["type"]) // 伪装：默认不暴露 upstream_error 类型
 	assert.Equal(t, "Upstream request failed", errField["message"])
 }
 
@@ -84,7 +84,7 @@ func TestOpenAIHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "upstream_error", errField["type"])
+	assert.Equal(t, "server_error", errField["type"]) // 伪装：默认不暴露 upstream_error 类型
 	assert.Equal(t, "Upstream request failed", errField["message"])
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"golang.org/x/net/http2"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
@@ -1090,47 +1091,152 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 //   - nil/空: 直连，使用 TLSFingerprintDialer
 //   - http/https: HTTP 代理，使用 HTTPProxyDialer（CONNECT 隧道 + utls 握手）
 //   - socks5: SOCKS5 代理，使用 SOCKS5ProxyDialer（SOCKS5 隧道 + utls 握手）
-func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile) (*http.Transport, error) {
-	transport := &http.Transport{
+// tlsDialFunc 执行 TCP+utls 握手并返回已完成握手的连接（ALPN 结果可经
+// tlsfingerprint.NegotiatedProtocol 读取）。
+type tlsDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// resolveTLSFingerprintDialer 根据代理类型返回对应的 utls 握手 dialer。
+// 返回的 ok=false 表示该代理类型不支持 utls 指纹（需回退普通 Transport）。
+func resolveTLSFingerprintDialer(proxyURL *url.URL, profile *tlsfingerprint.Profile) (dial tlsDialFunc, ok bool) {
+	if proxyURL == nil {
+		slog.Debug("tls_fingerprint_transport_direct")
+		return tlsfingerprint.NewDialer(profile, nil).DialTLSContext, true
+	}
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "socks5", "socks5h":
+		slog.Debug("tls_fingerprint_transport_socks5", "proxy", proxyURL.Host)
+		return tlsfingerprint.NewSOCKS5ProxyDialer(profile, proxyURL).DialTLSContext, true
+	case "http", "https":
+		slog.Debug("tls_fingerprint_transport_http_connect", "proxy", proxyURL.Host)
+		return tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL).DialTLSContext, true
+	default:
+		return nil, false
+	}
+}
+
+// errH2NotNegotiated 表示 utls 握手后 ALPN 未协商出 h2，h2.Transport 应放弃此连接。
+var errH2NotNegotiated = errors.New("tls fingerprint: peer did not negotiate h2 via ALPN")
+
+// tlsFingerprintTransport 是支持 h2-over-utls 的双协议 RoundTripper。
+//
+// 背景：真实 Claude Code（Node.js/undici）对上游走 HTTP/2，其 TLS 指纹标的
+// 也是 Node.js。此前实现把 ALPN 固定为 http/1.1 且强制 HTTP/1.1，导致“JA3/JA4
+// 对齐 Node、但 ALPN/协议版本却是 h1”的自相矛盾指纹。本类型让伪装连接在 ALPN
+// 协商出 h2 时真正以 HTTP/2 承载（经 golang.org/x/net/http2），与真实客户端一致；
+// 仅当上游不支持 h2 时回退到 HTTP/1.1。
+//
+// 选路策略：按 host 缓存协商结果，避免每次请求重复探测。首次默认尝试 h2，
+// 若该 host 实际只支持 h1 则记忆并后续直接走 h1。
+type tlsFingerprintTransport struct {
+	h1       *http.Transport
+	h2       *http2.Transport
+	hostMode sync.Map // host -> "h1" / "h2"
+}
+
+func (t *tlsFingerprintTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+	if mode, ok := t.hostMode.Load(host); ok && mode == "h1" {
+		return t.h1.RoundTrip(req)
+	}
+
+	resp, err := t.h2.RoundTrip(req)
+	if err == nil {
+		t.hostMode.Store(host, "h2")
+		return resp, nil
+	}
+	// h2 不可用（ALPN 未协商出 h2 或连接级失败）：记忆该 host 走 h1 并回退。
+	// 仅在请求体可重放时回退，避免重复消费 Body。
+	if isH2FallbackError(err) && requestBodyReplayable(req) {
+		t.hostMode.Store(host, "h1")
+		slog.Debug("tls_fingerprint_h2_fallback_to_h1", "host", host, "err", err)
+		return t.h1.RoundTrip(req)
+	}
+	return resp, err
+}
+
+// CloseIdleConnections 关闭两个底层 Transport 的空闲连接（供 http.Client 调用）。
+func (t *tlsFingerprintTransport) CloseIdleConnections() {
+	if t.h1 != nil {
+		t.h1.CloseIdleConnections()
+	}
+	if t.h2 != nil {
+		t.h2.CloseIdleConnections()
+	}
+}
+
+// isH2FallbackError 判断 h2 RoundTrip 错误是否应回退到 h1
+// （ALPN 未协商出 h2，或建连阶段失败）。
+func isH2FallbackError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errH2NotNegotiated) {
+		return true
+	}
+	// http2 在无法用某连接时通常包装为连接/协议层错误；保守地对建连类错误回退。
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http2: unsupported scheme") ||
+		strings.Contains(msg, "did not negotiate h2") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection refused")
+}
+
+// requestBodyReplayable 判断请求体是否可被安全重放（用于 h2→h1 回退）。
+func requestBodyReplayable(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return true
+	}
+	// 有 Body 时仅当提供了 GetBody（标准库为可重放请求生成）才安全回退。
+	return req.GetBody != nil
+}
+
+func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile) (http.RoundTripper, error) {
+	h1 := &http.Transport{
 		MaxIdleConns:          settings.maxIdleConns,
 		MaxIdleConnsPerHost:   settings.maxIdleConnsPerHost,
 		MaxConnsPerHost:       settings.maxConnsPerHost,
 		IdleConnTimeout:       settings.idleConnTimeout,
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
-		// 禁用默认的 TLS，我们使用自定义的 DialTLSContext
+		// 使用自定义 DialTLSContext，禁止标准库自动 HTTP/2（其无法识别 utls 连接）。
 		ForceAttemptHTTP2: false,
 	}
 
-	// 根据代理类型选择合适的 TLS 指纹 Dialer
-	if proxyURL == nil {
-		// 直连：使用 TLSFingerprintDialer
-		slog.Debug("tls_fingerprint_transport_direct")
-		dialer := tlsfingerprint.NewDialer(profile, nil)
-		transport.DialTLSContext = dialer.DialTLSContext
-	} else {
-		scheme := strings.ToLower(proxyURL.Scheme)
-		switch scheme {
-		case "socks5", "socks5h":
-			// SOCKS5 代理：使用 SOCKS5ProxyDialer
-			slog.Debug("tls_fingerprint_transport_socks5", "proxy", proxyURL.Host)
-			socks5Dialer := tlsfingerprint.NewSOCKS5ProxyDialer(profile, proxyURL)
-			transport.DialTLSContext = socks5Dialer.DialTLSContext
-		case "http", "https":
-			// HTTP/HTTPS 代理：使用 HTTPProxyDialer（CONNECT 隧道）
-			slog.Debug("tls_fingerprint_transport_http_connect", "proxy", proxyURL.Host)
-			httpDialer := tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL)
-			transport.DialTLSContext = httpDialer.DialTLSContext
-		default:
-			// 未知代理类型，回退到普通代理配置（无 TLS 指纹）
-			slog.Debug("tls_fingerprint_transport_unknown_scheme_fallback", "scheme", scheme)
-			if err := proxyutil.ConfigureTransportProxy(transport, proxyURL); err != nil {
-				return nil, err
-			}
+	dial, ok := resolveTLSFingerprintDialer(proxyURL, profile)
+	if !ok {
+		// 未知代理类型，回退到普通代理配置（无 TLS 指纹）。
+		slog.Debug("tls_fingerprint_transport_unknown_scheme_fallback", "scheme", proxyURL.Scheme)
+		if err := proxyutil.ConfigureTransportProxy(h1, proxyURL); err != nil {
+			return nil, err
 		}
+		return h1, nil
 	}
 
-	return transport, nil
+	h1.DialTLSContext = dial
+
+	// h2 Transport：复用同一 utls 握手 dialer。仅当 ALPN 协商出 h2 时返回连接，
+	// 否则返回 errH2NotNegotiated 让 RoundTrip 回退到 h1。
+	h2 := &http2.Transport{
+		ReadIdleTimeout: settings.idleConnTimeout,
+		// AllowHTTP=false：仅经 TLS 承载 h2（标准 h2，非 h2c 明文）。
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if tlsfingerprint.NegotiatedProtocol(conn) != "h2" {
+				_ = conn.Close()
+				return nil, errH2NotNegotiated
+			}
+			return conn, nil
+		},
+	}
+
+	return &tlsFingerprintTransport{h1: h1, h2: h2}, nil
 }
+
 
 // trackedBody 带跟踪功能的响应体包装器
 // 在 Close 时执行回调，用于更新请求计数

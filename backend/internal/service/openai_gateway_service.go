@@ -734,7 +734,7 @@ func resolveOpenAIWSFallbackErrorResponse(err error) (statusCode int, errType st
 		if statusCode == http.StatusTooManyRequests {
 			errType = "rate_limit_error"
 		} else {
-			errType = "upstream_error"
+			errType = "server_error"
 		}
 	}
 	clientMessage = upstreamMessage
@@ -3294,10 +3294,16 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	responseID := ""
 	imageCount := 0
 	var imageOutputSizes []string
+	var clientDisconnect bool
 	if reqStream {
 		result, err := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
 		if err != nil {
-			return nil, err
+			// 客户端断开且已捕获有效 usage：按已捕获用量计费，避免白嫖。
+			if openaiStreamDisconnectBillable(result, err) {
+				clientDisconnect = true
+			} else {
+				return nil, err
+			}
 		}
 		usage = result.usage
 		firstTokenMs = result.firstTokenMs
@@ -3325,17 +3331,18 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	forwardResult := &OpenAIForwardResult{
-		RequestID:       resp.Header.Get("x-request-id"),
-		ResponseID:      responseID,
-		Usage:           *usage,
-		Model:           reqModel,
-		UpstreamModel:   upstreamPassthroughModel,
-		ServiceTier:     serviceTier,
-		ReasoningEffort: reasoningEffort,
-		Stream:          reqStream,
-		OpenAIWSMode:    false,
-		Duration:        time.Since(startTime),
-		FirstTokenMs:    firstTokenMs,
+		RequestID:        resp.Header.Get("x-request-id"),
+		ResponseID:       responseID,
+		Usage:            *usage,
+		Model:            reqModel,
+		UpstreamModel:    upstreamPassthroughModel,
+		ServiceTier:      serviceTier,
+		ReasoningEffort:  reasoningEffort,
+		Stream:           reqStream,
+		OpenAIWSMode:     false,
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     firstTokenMs,
+		ClientDisconnect: clientDisconnect,
 	}
 	if imageCount > 0 {
 		forwardResult.ImageCount = imageCount
@@ -3645,6 +3652,30 @@ type openaiStreamingResultPassthrough struct {
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
+	clientDisconnect bool // 客户端是否在流式传输过程中断开
+}
+
+// openaiUsageHasTokens 判断 usage 是否捕获到任何计费 token。
+func openaiUsageHasTokens(u *OpenAIUsage) bool {
+	if u == nil {
+		return false
+	}
+	return u.InputTokens > 0 || u.OutputTokens > 0 ||
+		u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 ||
+		u.ImageOutputTokens > 0
+}
+
+// openaiStreamDisconnectBillable 判断一次返回 error 的 OpenAI 流式响应是否应
+// 被“抢救”为可计费结果（客户端断开 + 已捕获有效 usage）。语义同 Anthropic 路径的
+// streamDisconnectBillable，用于避免客户端在终止事件前断开导致整次请求不计费（白嫖）。
+func openaiStreamDisconnectBillable(result *openaiStreamingResultPassthrough, err error) bool {
+	if err == nil || result == nil {
+		return false
+	}
+	if !result.clientDisconnect {
+		return false
+	}
+	return openaiUsageHasTokens(result.usage)
 }
 
 type openaiNonStreamingResultPassthrough struct {
@@ -3755,7 +3786,7 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverError(
 	}
 	body, _ := json.Marshal(gin.H{
 		"error": gin.H{
-			"type":    "upstream_error",
+			"type":    "server_error",
 			"message": message,
 		},
 	})
@@ -3832,6 +3863,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			responseID:       responseID,
 			imageCount:       imageCounter.Count(),
 			imageOutputSizes: imageCounter.Sizes(),
+			clientDisconnect: clientDisconnected,
 		}
 	}
 
@@ -4287,7 +4319,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		resp.StatusCode,
 		body,
 		http.StatusBadGateway,
-		"upstream_error",
+		"server_error",
 		"Upstream request failed",
 	); matched {
 		MarkResponseCommitted(c)
@@ -4321,7 +4353,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		MarkResponseCommitted(c)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
-				"type":    "upstream_error",
+				"type":    "server_error",
 				"message": "Upstream gateway error",
 			},
 		})
@@ -4371,15 +4403,15 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	switch resp.StatusCode {
 	case 401:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "server_error"
 		errMsg = "Upstream authentication failed, please contact administrator"
 	case 402:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "server_error"
 		errMsg = "Upstream payment required: insufficient balance or billing issue"
 	case 403:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "server_error"
 		errMsg = "Upstream access forbidden, please contact administrator"
 	case 429:
 		statusCode = http.StatusTooManyRequests
@@ -4387,7 +4419,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		errMsg = "Upstream rate limit exceeded, please retry later"
 	default:
 		statusCode = http.StatusBadGateway
-		errType = "upstream_error"
+		errType = "server_error"
 		errMsg = "Upstream request failed"
 	}
 
@@ -4633,7 +4665,7 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 			return
 		}
 		errorEventSent = true
-		payload := `{"type":"error","sequence_number":0,"error":{"type":"upstream_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
+		payload := `{"type":"error","sequence_number":0,"error":{"type":"server_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			return
@@ -5319,7 +5351,7 @@ func (s *OpenAIGatewayService) writeOpenAINonStreamingProtocolError(resp *http.R
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.JSON(http.StatusBadGateway, gin.H{
 		"error": gin.H{
-			"type":    "upstream_error",
+			"type":    "server_error",
 			"message": message,
 		},
 	})
@@ -5821,7 +5853,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 			zap.Int64("api_key_id", apiKey.ID),
 			zap.Int64("account_id", account.ID),
 		).Warn("openai_usage.pricing_missing_record_zero_cost", zap.Error(err))
-		cost = &CostBreakdown{BillingMode: string(BillingModeToken)}
+		cost = &CostBreakdown{BillingMode: string(BillingModeToken), PricingUnavailable: true}
 	}
 
 	// Determine billing type

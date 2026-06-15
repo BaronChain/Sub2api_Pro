@@ -155,6 +155,10 @@ type CostBreakdown struct {
 	TotalCost         float64
 	ActualCost        float64 // 应用倍率后的实际费用
 	BillingMode       string  // 计费模式（"token"/"per_request"/"image"），由 CalculateCostUnified 填充
+
+	// PricingUnavailable 标记本次计费因模型缺少任何可用定价（动态价格 / 渠道价格 /
+	// fallback 均缺失）而降级为 0。上层据此告警并可观测，但仍按实际 token 记账。
+	PricingUnavailable bool
 }
 
 // ErrModelPricingUnavailable indicates that none of the configured pricing
