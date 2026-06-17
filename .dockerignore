@@ -11,6 +11,9 @@
 *.md
 !deploy/DOCKER.md
 docs/
+# Exception: legal docs are imported by frontend via ?raw at build time
+!docs/legal/
+!docs/legal/*.md
 
 # IDE
 .idea/
