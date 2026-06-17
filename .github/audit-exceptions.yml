@@ -35,3 +35,10 @@ exceptions:
     mitigation: "Proxy configuration not user-controlled; upgrade when axios releases fix"
     expires_on: "2026-07-10"
     owner: "security@your-domain"
+  - package: form-data
+    advisory: "GHSA-hmw2-7cc7-3qxx"
+    severity: high
+    reason: "CRLF injection via multipart field names/filenames; form-data is a Node.js-only transitive dep of axios and never reaches the browser runtime; no multipart uploads in frontend"
+    mitigation: "Frontend runs in browser using native FormData; no user-controlled multipart field names; upgrade form-data when axios publishes a fix"
+    expires_on: "2026-07-10"
+    owner: "security@your-domain"

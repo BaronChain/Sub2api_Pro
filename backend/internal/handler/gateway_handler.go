@@ -197,7 +197,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 计费预检：转发前确认该模型存在可用定价（渠道/动态/fallback 任一），
 	// 否则直接拒绝，避免请求成功转发后才发现无定价而静默按 0 计费（白嫖）。
-	if !h.gatewayService.HasPricingForModel(c.Request.Context(), reqModel, apiKey) {
+	//
+	// 豁免：若 body 命中 warmup / SUGGESTION MODE / max_tokens=1+haiku 探测等拦截模式，
+	// 该请求可能被账号级 intercept_warmup_requests 直接 mock 返回（不转发上游、不产生计费），
+	// 不应被定价预检误伤。即使选中账号未开启拦截导致最终走转发，既有 PricingUnavailable
+	// 兜底（按 0 计费 + 告警）仍会生效，与预检引入前行为一致，不会引入白嫖风险。
+	if detectInterceptType(body, reqModel, parsedReq.MaxTokens, reqStream, isClaudeCodeClient) == InterceptTypeNone &&
+		!h.gatewayService.HasPricingForModel(c.Request.Context(), reqModel, apiKey) {
 		reqLog.Warn("gateway.model_pricing_not_configured", zap.String("model", reqModel))
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model pricing is not configured: "+reqModel)
 		return

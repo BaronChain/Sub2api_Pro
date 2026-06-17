@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,8 +273,14 @@ func TestGatewayHandlerMessages_InterceptWarmup_AntigravityAccount_MixedScheduli
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, "msg_mock_warmup", resp["id"])
 	require.Equal(t, "claude-sonnet-4-5", resp["model"])
+
+	// mock 响应使用 generateRealisticMsgID 生成仿真 msg_bdrk_ 前缀 ID，
+	// 这里只校验前缀与格式，不绑定具体随机值。
+	msgID, ok := resp["id"].(string)
+	require.True(t, ok, "resp.id should be a string")
+	require.True(t, strings.HasPrefix(msgID, "msg_bdrk_"), "resp.id should have msg_bdrk_ prefix, got: %s", msgID)
+	require.Len(t, strings.TrimPrefix(msgID, "msg_bdrk_"), 24, "resp.id should be msg_bdrk_ + 24 chars, got: %s", msgID)
 
 	content, ok := resp["content"].([]any)
 	require.True(t, ok)
@@ -361,6 +368,12 @@ func TestGatewayHandlerMessages_InterceptWarmup_AntigravityAccount_ForcePlatform
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, "msg_mock_warmup", resp["id"])
 	require.Equal(t, "claude-sonnet-4-5", resp["model"])
+
+	// mock 响应使用 generateRealisticMsgID 生成仿真 msg_bdrk_ 前缀 ID，
+	// 这里只校验前缀与格式，不绑定具体随机值。
+	msgID, ok := resp["id"].(string)
+	require.True(t, ok, "resp.id should be a string")
+	require.True(t, strings.HasPrefix(msgID, "msg_bdrk_"), "resp.id should have msg_bdrk_ prefix, got: %s", msgID)
+	require.Len(t, strings.TrimPrefix(msgID, "msg_bdrk_"), 24, "resp.id should be msg_bdrk_ + 24 chars, got: %s", msgID)
 }

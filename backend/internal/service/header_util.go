@@ -48,14 +48,13 @@ var headerWireCasing = map[string]string{
 // 用途与已知限制（务必阅读，避免误用）：
 //   - 本顺序当前**仅用于 debug 日志**（见 sortHeadersByWireOrder 的调用方
 //     debugLogGatewaySnapshot），便于把转发请求与真实抓包逐行对比。
-//   - 它**不会**影响实际发往上游的 wire 顺序。原因：
-//       1. HTTP/2（utls 指纹主路径，ALPN 协商 h2 后由 golang.org/x/net/http2
-//          承载）使用 HPACK 编码，常规 header 顺序不构成 JA3/指纹判据，且
-//          Go http2 不暴露 header 顺序控制。
-//       2. HTTP/1.1（回退路径）由标准库 net/http 写出，net/http 对普通 header
-//          按字典序写出且不支持自定义顺序；若要强制顺序须完全接管请求序列化，
-//          会绕过连接池、超时、重定向与 DNS-rebinding 校验（validatedTransport），
-//          风险远大于收益。
+//   - 它**不会**影响实际发往上游的 wire 顺序，原因有二。其一，HTTP/2（utls
+//     指纹主路径，ALPN 协商 h2 后由 golang.org/x/net/http2 承载）使用 HPACK
+//     编码，常规 header 顺序不构成 JA3/指纹判据，且 Go http2 不暴露 header
+//     顺序控制。其二，HTTP/1.1（回退路径）由标准库 net/http 写出，net/http
+//     对普通 header 按字典序写出且不支持自定义顺序；若要强制顺序须完全接管
+//     请求序列化，会绕过连接池、超时、重定向与 DNS-rebinding 校验
+//     （validatedTransport），风险远大于收益。
 //   - 已生效的指纹对齐：header **大小写**（setHeaderRaw + headerWireCasing）与
 //     TLS ALPN/协议版本（h2-over-utls）。header 顺序属已知短板，主路径走 h2 后
 //     其指纹价值很低。

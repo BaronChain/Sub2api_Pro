@@ -1091,6 +1091,7 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 //   - nil/空: 直连，使用 TLSFingerprintDialer
 //   - http/https: HTTP 代理，使用 HTTPProxyDialer（CONNECT 隧道 + utls 握手）
 //   - socks5: SOCKS5 代理，使用 SOCKS5ProxyDialer（SOCKS5 隧道 + utls 握手）
+//
 // tlsDialFunc 执行 TCP+utls 握手并返回已完成握手的连接（ALPN 结果可经
 // tlsfingerprint.NegotiatedProtocol 读取）。
 type tlsDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -1236,7 +1237,6 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 
 	return &tlsFingerprintTransport{h1: h1, h2: h2}, nil
 }
-
 
 // trackedBody 带跟踪功能的响应体包装器
 // 在 Close 时执行回调，用于更新请求计数
