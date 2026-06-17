@@ -8,12 +8,14 @@
 .gitattributes
 
 # Documentation
+# Note: 不能用 "docs/" 排除整个目录，否则 !docs/legal/ 例外规则不生效
+# （Docker 不会进入已排除的目录去检查子项例外）
 *.md
 !deploy/DOCKER.md
-docs/
-# Exception: legal docs are imported by frontend via ?raw at build time
+docs/*
 !docs/legal/
-!docs/legal/*.md
+!docs/legal/**
+!DEPLOY_GUIDE.md
 
 # IDE
 .idea/
