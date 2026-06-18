@@ -2,6 +2,14 @@ docs/claude-relay-service/
 .codex
 
 # ===================
+# 本地部署脚本 (deploy-local)
+# ===================
+# 含服务器连接信息, 不入库
+scripts/deploy-local/deploy.config.ps1
+# 镜像导出临时目录
+scripts/deploy-local/.tmp/
+
+# ===================
 # Go 后端
 # ===================
 # 二进制文件
