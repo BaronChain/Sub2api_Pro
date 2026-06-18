@@ -158,6 +158,18 @@
 | 改后台/用户页面 | `frontend/src/views/{admin,user}/` + 对应 `api/` + `stores/` |
 | 部署 / Docker | `deploy/` + `docs/部署指南.md` |
 | 本地预览 / 增量推送服务器 | `scripts/deploy-local/` + `docs/本地开发与增量部署指南.md` |
+| 文档站（docs.freecode.codes） | `docs-site/`（VuePress 2 + Theme Hope） |
+
+---
+
+## 7. 服务器 SSH 操作（必读）
+
+> **所有涉及 SSH / 服务器操作的任务，必须先读取 `SERVER_INFO.md` 获取连接信息（IP、端口、用户、私钥路径）。**
+> 该文件已被 `.gitignore` 排除，不会入库。
+
+- SSH 命令模板：`ssh -i ~/.ssh/id_ed25519 root@47.84.98.213 '<命令>'`
+- 文档站静态文件部署在 `/var/www/docs.freecode.codes/`，反代由 Caddy 管理（`/etc/caddy/Caddyfile`）。
+- 文档站更新流程：`cd docs-site && pnpm docs:build` → tar 管道上传到 `/var/www/docs.freecode.codes/`。
 
 ---
 

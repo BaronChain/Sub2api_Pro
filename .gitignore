@@ -120,6 +120,9 @@ backend/config.yaml
 deploy/config.yaml
 backend/.installed
 
+# 服务器 SSH 连接信息（含私钥路径等敏感信息）
+SERVER_INFO.md
+
 # ===================
 # 其他
 # ===================
